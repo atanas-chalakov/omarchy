@@ -768,6 +768,36 @@ mapfile -d '' -t launch_args <"$launch_log"
   fail "agent launcher passes --plan"
 pass "agent launcher passes --plan"
 
+: >"$launch_log"
+OMARCHY_TEST_AGENT_INSTALLED=true omarchy-default-agent claude
+omarchy-agent --continue
+mapfile -d '' -t launch_args <"$launch_log"
+[[ ${launch_args[*]} == "--app-id=org.omarchy.agent claude --permission-mode auto --continue" ]] ||
+  fail "agent launcher passes --continue to Claude"
+pass "agent launcher passes --continue to Claude"
+
+: >"$launch_log"
+omarchy-agent --plan
+mapfile -d '' -t launch_args <"$launch_log"
+[[ ${launch_args[*]} == "--app-id=org.omarchy.agent claude --permission-mode plan" ]] ||
+  fail "agent launcher passes --plan to Claude"
+pass "agent launcher passes --plan to Claude"
+
+: >"$launch_log"
+OMARCHY_TEST_AGENT_INSTALLED=true omarchy-default-agent copilot
+omarchy-agent --continue
+mapfile -d '' -t launch_args <"$launch_log"
+[[ ${launch_args[*]} == "--app-id=org.omarchy.agent copilot --allow-all --continue" ]] ||
+  fail "agent launcher passes --continue to Copilot"
+pass "agent launcher passes --continue to Copilot"
+
+: >"$launch_log"
+omarchy-agent --plan
+mapfile -d '' -t launch_args <"$launch_log"
+[[ ${launch_args[*]} == "--app-id=org.omarchy.agent copilot --allow-all --plan" ]] ||
+  fail "agent launcher passes --plan to Copilot"
+pass "agent launcher passes --plan to Copilot"
+
 printf '%s\n' "missing" >"$agent_file"
 if OMARCHY_TEST_MISSING_COMMAND=missing omarchy-agent >"$test_tmp/missing-output" 2>&1; then
   fail "agent launcher rejects a missing default command"

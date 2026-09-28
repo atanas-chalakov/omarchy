@@ -1,0 +1,252 @@
+#!/usr/bin/python3
+# omarchy:summary=Print the GitHub Copilot usage record as JSON
+# omarchy:args=[--force] [--limits-only]
+# omarchy:hidden=true
+"""Collect GitHub Copilot usage into one display-ready JSON record.
+
+Everything the agents panel shows for Copilot comes from this
+command: local prompt and session stats from
+~/.copilot/session-store.db.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+from pathlib import Path
+import sqlite3
+from typing import Any
+
+AGENT_ID = "copilot"
+AGENT_NAME = "GitHub Copilot"
+
+
+def config_dir() -> Path:
+  return Path(os.environ.get("COPILOT_HOME") or "~/.copilot").expanduser().resolve()
+
+
+def date_string(value: dt.date) -> str:
+  return value.strftime("%Y-%m-%d")
+
+
+def recent_date_strings() -> list[str]:
+  today = dt.datetime.now().date()
+  return [date_string(today - dt.timedelta(days=offset)) for offset in range(6, -1, -1)]
+
+
+def scan_copilot_history(base_dir: Path) -> dict[str, Any]:
+  db_path = base_dir / "session-store.db"
+
+  today = dt.datetime.now().date()
+  today_str = date_string(today)
+
+  recent_dates = recent_date_strings()
+
+  total_prompts = 0
+  today_prompts = 0
+  total_sessions = 0
+  today_sessions = 0
+  today_total_tokens = 0
+  active_turns = 1
+  active_session_id = None
+  active_summary = None
+  active_branch = None
+
+  model_usage: dict[str, Any] = {}
+  today_tokens_by_model: dict[str, int] = {}
+  by_day: dict[str, int] = {}
+  active_dates: list[str] = []
+
+  if db_path.is_file():
+    try:
+      conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+      c = conn.cursor()
+
+      # Recent session info
+      try:
+        c.execute(
+            "SELECT id, summary, branch, updated_at FROM sessions "
+            "ORDER BY updated_at DESC LIMIT 1"
+        )
+        recent = c.fetchone()
+        if recent:
+          active_session_id = recent[0]
+          active_summary = recent[1]
+          active_branch = recent[2]
+      except Exception:
+        pass
+
+      # Session counts
+      try:
+        c.execute("SELECT count(*) FROM sessions")
+        total_sessions = int(c.fetchone()[0] or 0)
+        c.execute(
+            "SELECT count(*) FROM sessions WHERE substr(updated_at, 1, 10) = ?",
+            (today_str,),
+        )
+        today_sessions = int(c.fetchone()[0] or 0)
+      except Exception:
+        pass
+
+      # Turns / prompt counts
+      try:
+        c.execute("SELECT count(*) FROM turns")
+        total_prompts = int(c.fetchone()[0] or 0)
+        c.execute(
+            "SELECT count(*) FROM turns WHERE substr(timestamp, 1, 10) = ?",
+            (today_str,),
+        )
+        today_prompts = int(c.fetchone()[0] or 0)
+      except Exception:
+        pass
+
+      # Active session turns
+      if active_session_id:
+        try:
+          c.execute(
+              "SELECT count(*) FROM turns WHERE session_id = ?",
+              (active_session_id,),
+          )
+          row = c.fetchone()
+          if row and row[0]:
+            active_turns = int(row[0])
+        except Exception:
+          pass
+
+      # Model usage all-time
+      try:
+        c.execute(
+            "SELECT model, sum(input_tokens), sum(output_tokens), "
+            "sum(cache_read_tokens), sum(cache_write_tokens) "
+            "FROM assistant_usage_events GROUP BY model"
+        )
+        for m, inp, out, cr, cw in c.fetchall():
+          if m:
+            model_usage[str(m)] = {
+                "inputTokens": int(inp or 0),
+                "outputTokens": int(out or 0),
+                "cacheReadInputTokens": int(cr or 0),
+                "cacheCreationInputTokens": int(cw or 0),
+            }
+      except Exception:
+        pass
+
+      # Today tokens
+      try:
+        c.execute(
+            "SELECT model, sum(input_tokens + output_tokens) "
+            "FROM assistant_usage_events WHERE substr(created_at, 1, 10) = ? "
+            "GROUP BY model",
+            (today_str,),
+        )
+        for m, tok in c.fetchall():
+          if m:
+            t = int(tok or 0)
+            today_tokens_by_model[str(m)] = t
+            today_total_tokens += t
+      except Exception:
+        pass
+
+      # Daily tokens across recent days
+      try:
+        c.execute(
+            "SELECT substr(created_at, 1, 10), sum(input_tokens + output_tokens) "
+            "FROM assistant_usage_events GROUP BY substr(created_at, 1, 10)"
+        )
+        by_day = {str(k): int(v or 0) for k, v in c.fetchall() if k}
+      except Exception:
+        pass
+
+      # Active dates
+      try:
+        c.execute(
+            "SELECT DISTINCT substr(created_at, 1, 10) FROM assistant_usage_events "
+            "UNION SELECT DISTINCT substr(timestamp, 1, 10) FROM turns"
+        )
+        active_dates = sorted([str(r[0]) for r in c.fetchall() if r[0]])
+      except Exception:
+        pass
+
+      conn.close()
+    except Exception:
+      pass
+
+  recent_days = [{"date": d, "messageCount": by_day.get(d, 0)} for d in recent_dates]
+
+  limits = []
+  if total_prompts > 0 or total_sessions > 0:
+    session_percent = min(1.0, max(0.02, active_turns / 50.0))
+    limits.append({
+        "label": "Session",
+        "title": "Session Turns",
+        "percent": round(session_percent, 2),
+        "resetsAt": "",
+    })
+
+    next_midnight = (today + dt.timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z")
+    daily_percent = min(1.0, max(0.02, today_prompts / 50.0))
+    limits.append({
+        "label": "Weekly (7-day)",
+        "title": "Daily Quota",
+        "percent": round(daily_percent, 2),
+        "resetsAt": next_midnight,
+    })
+
+  status_text = ""
+  if active_session_id:
+    status_text = f"Current: {active_summary or active_branch or 'Session'}"
+  elif total_prompts > 0:
+    status_text = f"{today_prompts} prompts today"
+
+  return {
+      "totalPrompts": total_prompts,
+      "todayPrompts": today_prompts,
+      "totalSessions": total_sessions,
+      "todaySessions": today_sessions,
+      "todayTotalTokens": today_total_tokens,
+      "todayTokensByModel": today_tokens_by_model,
+      "modelUsage": model_usage,
+      "recentDays": recent_days,
+      "activeDays": len(active_dates),
+      "activeDates": active_dates,
+      "limits": limits,
+      "statusText": status_text,
+  }
+
+
+def main() -> int:
+  parser = argparse.ArgumentParser(description=__doc__)
+  parser.add_argument("--force", action="store_true", help="bypass caches")
+  parser.add_argument("--limits-only", action="store_true", help="skip scanning history")
+  args = parser.parse_args()
+
+  base_dir = config_dir()
+  stats = scan_copilot_history(base_dir)
+
+  has_data = stats["totalPrompts"] > 0 or stats["totalSessions"] > 0
+
+  limits = stats.pop("limits", [])
+  status_text = stats.pop("statusText", "")
+
+  record = {
+      "schemaVersion": 1,
+      "id": AGENT_ID,
+      "name": AGENT_NAME,
+      "updatedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
+      "ready": has_data,
+      "hasLocalStats": True,
+      "hasPromptStats": True,
+      "tierLabel": "GitHub Copilot" if has_data else "",
+      "usageStatusText": status_text if has_data else "No usage recorded",
+      "authHelpText": "",
+      "limits": limits if has_data else [],
+  }
+  record.update(stats)
+  print(json.dumps(record, separators=(",", ":"), sort_keys=True))
+  return 0
+
+
+if __name__ == "__main__":
+  raise SystemExit(main())

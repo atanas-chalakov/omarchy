@@ -89,7 +89,9 @@ crush)
   fi
   ;;
 claude)
-  command=(claude --permission-mode auto)
+  claude_mode="auto"
+  [[ $plan_mode == "true" ]] && claude_mode="plan"
+  command=(claude --permission-mode "$claude_mode")
   [[ $continue_session == "true" ]] && command+=(--continue)
   [[ -n ${prompt:-} ]] && command+=(-- "$prompt")
   ;;
