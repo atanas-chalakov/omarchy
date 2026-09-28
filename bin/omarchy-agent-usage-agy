@@ -1,0 +1,148 @@
+#!/usr/bin/python3
+# omarchy:summary=Print the Antigravity usage record as JSON
+# omarchy:args=[--force] [--limits-only]
+# omarchy:hidden=true
+"""Collect Antigravity usage into one display-ready JSON record.
+
+Everything the agents panel shows for Antigravity comes from this
+command: local prompt and session stats from
+~/.gemini/antigravity-cli/history.jsonl and conversations/.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+from pathlib import Path
+from typing import Any
+
+AGENT_ID = "agy"
+AGENT_NAME = "Antigravity"
+
+
+def config_dir() -> Path:
+  return Path(os.environ.get("ANTIGRAVITY_DATA_DIR") or "~/.gemini/antigravity-cli").expanduser().resolve()
+
+
+def date_string(value: dt.date) -> str:
+  return value.strftime("%Y-%m-%d")
+
+
+def recent_date_strings() -> list[str]:
+  today = dt.datetime.now().date()
+  return [date_string(today - dt.timedelta(days=offset)) for offset in range(6, -1, -1)]
+
+
+def scan_antigravity_history(base_dir: Path) -> dict[str, Any]:
+  history_file = base_dir / "history.jsonl"
+  conv_dir = base_dir / "conversations"
+
+  today = dt.datetime.now().date()
+  today_str = date_string(today)
+
+  total_prompts = 0
+  today_prompts = 0
+  day_counts: dict[str, int] = {}
+  active_dates: set[str] = set()
+  conversation_ids: set[str] = set()
+  today_conversations: set[str] = set()
+
+  if history_file.is_file():
+    try:
+      with open(history_file, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+          line = line.strip()
+          if not line:
+            continue
+          total_prompts += 1
+          try:
+            entry = json.loads(line)
+            ts = entry.get("timestamp")
+            conv_id = entry.get("conversationId")
+            if conv_id:
+              conversation_ids.add(str(conv_id))
+            if isinstance(ts, (int, float)):
+              seconds = float(ts) / 1000.0 if float(ts) > 10_000_000_000 else float(ts)
+              entry_date = dt.datetime.fromtimestamp(seconds).date()
+              ds = date_string(entry_date)
+              active_dates.add(ds)
+              day_counts[ds] = day_counts.get(ds, 0) + 1
+              if ds == today_str:
+                today_prompts += 1
+                if conv_id:
+                  today_conversations.add(str(conv_id))
+          except Exception:
+            continue
+    except Exception:
+      pass
+
+  if conv_dir.is_dir():
+    try:
+      for item in conv_dir.iterdir():
+        if item.name.endswith(".db"):
+          cid = item.name[:-3]
+          conversation_ids.add(cid)
+          try:
+            mtime_date = dt.datetime.fromtimestamp(item.stat().st_mtime).date()
+            if date_string(mtime_date) == today_str:
+              today_conversations.add(cid)
+          except Exception:
+            pass
+    except Exception:
+      pass
+
+  recent_days = [
+    {"date": d, "messageCount": day_counts.get(d, 0)}
+    for d in recent_date_strings()
+  ]
+
+  total_sessions = len(conversation_ids) if conversation_ids else (1 if total_prompts > 0 else 0)
+  today_sessions = len(today_conversations) if today_conversations else (1 if today_prompts > 0 else 0)
+
+  return {
+    "totalPrompts": total_prompts,
+    "todayPrompts": today_prompts,
+    "totalSessions": total_sessions,
+    "todaySessions": today_sessions,
+    "activeDays": len(active_dates),
+    "activeDates": sorted(active_dates),
+    "recentDays": recent_days,
+    "todayTotalTokens": 0,
+    "todayTokensByModel": {},
+    "modelUsage": {},
+  }
+
+
+def main() -> int:
+  parser = argparse.ArgumentParser(description=__doc__)
+  parser.add_argument("--force", action="store_true", help="bypass caches")
+  parser.add_argument("--limits-only", action="store_true", help="skip scanning history")
+  args = parser.parse_args()
+
+  base_dir = config_dir()
+  stats = scan_antigravity_history(base_dir)
+
+  has_data = stats["totalPrompts"] > 0 or stats["totalSessions"] > 0
+
+  record = {
+    "schemaVersion": 1,
+    "id": AGENT_ID,
+    "name": AGENT_NAME,
+    "updatedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
+    "ready": has_data,
+    "hasLocalStats": True,
+    "hasPromptStats": True,
+    "tierLabel": "Active" if has_data else "",
+    "usageStatusText": "" if has_data else "No usage recorded",
+    "authHelpText": "",
+    "limits": [],
+  }
+  record.update(stats)
+  print(json.dumps(record, separators=(",", ":"), sort_keys=True))
+  return 0
+
+
+if __name__ == "__main__":
+  raise SystemExit(main())
