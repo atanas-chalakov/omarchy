@@ -56,3 +56,11 @@ pass "Antigravity collector counts total sessions"
 [[ $(jq -r '.recentDays[-1].messageCount' <<<"$result") == "2" ]] ||
   fail "Antigravity collector populates recentDays" "$result"
 pass "Antigravity collector populates recentDays"
+
+[[ $(jq -r '.limits | length' <<<"$result") -ge 1 ]] ||
+  fail "Antigravity collector populates limits" "$result"
+pass "Antigravity collector populates limits"
+
+[[ $(jq -r '.tierLabel' <<<"$result") == "Gemini 3.8 Flash" ]] ||
+  fail "Antigravity collector reports tierLabel" "$result"
+pass "Antigravity collector reports tierLabel"

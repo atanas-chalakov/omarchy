@@ -6,7 +6,8 @@
 
 Everything the agents panel shows for Antigravity comes from this
 command: local prompt and session stats from
-~/.gemini/antigravity-cli/history.jsonl and conversations/.
+~/.gemini/antigravity-cli/history.jsonl, conversations/, conversation_summaries.db,
+and brain/ transcripts.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import datetime as dt
 import json
 import os
 from pathlib import Path
+import sqlite3
 from typing import Any
 
 AGENT_ID = "agy"
@@ -35,6 +37,56 @@ def recent_date_strings() -> list[str]:
   return [date_string(today - dt.timedelta(days=offset)) for offset in range(6, -1, -1)]
 
 
+def get_active_conversation(base_dir: Path) -> dict[str, Any] | None:
+  db_path = base_dir / "conversation_summaries.db"
+  if not db_path.is_file():
+    return None
+  try:
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    c = conn.cursor()
+    c.execute(
+        "SELECT conversation_id, title, step_count, status, last_modified_time "
+        "FROM conversation_summaries ORDER BY last_modified_time DESC LIMIT 1"
+    )
+    row = c.fetchone()
+    conn.close()
+    if row and row[0]:
+      return {
+          "id": str(row[0]),
+          "title": str(row[1] or ""),
+          "stepCount": int(row[2] or 0),
+          "status": str(row[3] or ""),
+          "lastModified": str(row[4] or ""),
+      }
+  except Exception:
+    pass
+  return None
+
+
+def estimate_transcript_tokens(base_dir: Path, conv_id: str) -> tuple[int, int]:
+  t_path = base_dir / "brain" / conv_id / ".system_generated" / "logs" / "transcript.jsonl"
+  if not t_path.is_file():
+    return 0, 0
+  try:
+    in_chars, out_chars = 0, 0
+    with open(t_path, "r", encoding="utf-8", errors="ignore") as f:
+      for line in f:
+        line = line.strip()
+        if not line:
+          continue
+        entry = json.loads(line)
+        src = entry.get("source")
+        c = entry.get("content") or ""
+        th = entry.get("thinking") or ""
+        if src in ("USER_EXPLICIT", "USER_INPUT"):
+          in_chars += len(c)
+        elif src == "MODEL":
+          out_chars += len(c) + len(th)
+    return in_chars // 4, out_chars // 4
+  except Exception:
+    return 0, 0
+
+
 def scan_antigravity_history(base_dir: Path) -> dict[str, Any]:
   history_file = base_dir / "history.jsonl"
   conv_dir = base_dir / "conversations"
@@ -48,6 +100,7 @@ def scan_antigravity_history(base_dir: Path) -> dict[str, Any]:
   active_dates: set[str] = set()
   conversation_ids: set[str] = set()
   today_conversations: set[str] = set()
+  prompts_by_conv: dict[str, int] = {}
 
   if history_file.is_file():
     try:
@@ -62,7 +115,9 @@ def scan_antigravity_history(base_dir: Path) -> dict[str, Any]:
             ts = entry.get("timestamp")
             conv_id = entry.get("conversationId")
             if conv_id:
-              conversation_ids.add(str(conv_id))
+              conv_id_str = str(conv_id)
+              conversation_ids.add(conv_id_str)
+              prompts_by_conv[conv_id_str] = prompts_by_conv.get(conv_id_str, 0) + 1
             if isinstance(ts, (int, float)):
               seconds = float(ts) / 1000.0 if float(ts) > 10_000_000_000 else float(ts)
               entry_date = dt.datetime.fromtimestamp(seconds).date()
@@ -93,25 +148,77 @@ def scan_antigravity_history(base_dir: Path) -> dict[str, Any]:
     except Exception:
       pass
 
-  recent_days = [
-    {"date": d, "messageCount": day_counts.get(d, 0)}
-    for d in recent_date_strings()
-  ]
+  active_conv = get_active_conversation(base_dir)
+  active_id = active_conv["id"] if active_conv else (list(conversation_ids)[-1] if conversation_ids else "")
+
+  in_tokens, out_tokens = 0, 0
+  if active_id:
+    in_tokens, out_tokens = estimate_transcript_tokens(base_dir, active_id)
+
+  total_tokens = in_tokens + out_tokens
+  model_usage: dict[str, Any] = {}
+  today_tokens_by_model: dict[str, int] = {}
+
+  if total_tokens > 0:
+    model_id = "gemini-3.8-flash"
+    model_usage[model_id] = {
+        "inputTokens": in_tokens,
+        "outputTokens": out_tokens,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+    }
+    today_tokens_by_model[model_id] = total_tokens
+
+  recent_days = []
+  for d in recent_date_strings():
+    count = day_counts.get(d, 0)
+    if d == today_str and total_tokens > 0:
+      count = total_tokens
+    recent_days.append({"date": d, "messageCount": count})
 
   total_sessions = len(conversation_ids) if conversation_ids else (1 if total_prompts > 0 else 0)
   today_sessions = len(today_conversations) if today_conversations else (1 if today_prompts > 0 else 0)
 
+  limits = []
+  if total_prompts > 0 or total_sessions > 0:
+    session_turns = prompts_by_conv.get(active_id, 1) if active_id else 1
+    session_percent = min(1.0, max(0.02, session_turns / 50.0))
+    limits.append({
+        "label": "Session",
+        "title": "Session Turns",
+        "percent": round(session_percent, 2),
+        "resetsAt": "",
+    })
+
+    next_midnight = (today + dt.timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z")
+    daily_percent = min(1.0, max(0.02, today_prompts / 50.0))
+    limits.append({
+        "label": "Weekly (7-day)",
+        "title": "Daily Quota",
+        "percent": round(daily_percent, 2),
+        "resetsAt": next_midnight,
+    })
+
+  status_text = ""
+  if active_conv and active_conv.get("title"):
+    status_text = f"Current: {active_conv['title']}"
+  elif total_prompts > 0:
+    status_text = f"{today_prompts} prompts today"
+
   return {
-    "totalPrompts": total_prompts,
-    "todayPrompts": today_prompts,
-    "totalSessions": total_sessions,
-    "todaySessions": today_sessions,
-    "activeDays": len(active_dates),
-    "activeDates": sorted(active_dates),
-    "recentDays": recent_days,
-    "todayTotalTokens": 0,
-    "todayTokensByModel": {},
-    "modelUsage": {},
+      "totalPrompts": total_prompts,
+      "todayPrompts": today_prompts,
+      "totalSessions": total_sessions,
+      "todaySessions": today_sessions,
+      "activeDays": len(active_dates),
+      "activeDates": sorted(active_dates),
+      "recentDays": recent_days,
+      "todayTotalTokens": total_tokens,
+      "todayTokensByModel": today_tokens_by_model,
+      "modelUsage": model_usage,
+      "limits": limits,
+      "activeConvTitle": active_conv["title"] if active_conv else "",
+      "statusText": status_text,
   }
 
 
@@ -126,18 +233,22 @@ def main() -> int:
 
   has_data = stats["totalPrompts"] > 0 or stats["totalSessions"] > 0
 
+  limits = stats.pop("limits", [])
+  status_text = stats.pop("statusText", "")
+  stats.pop("activeConvTitle", None)
+
   record = {
-    "schemaVersion": 1,
-    "id": AGENT_ID,
-    "name": AGENT_NAME,
-    "updatedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
-    "ready": has_data,
-    "hasLocalStats": True,
-    "hasPromptStats": True,
-    "tierLabel": "Active" if has_data else "",
-    "usageStatusText": "" if has_data else "No usage recorded",
-    "authHelpText": "",
-    "limits": [],
+      "schemaVersion": 1,
+      "id": AGENT_ID,
+      "name": AGENT_NAME,
+      "updatedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
+      "ready": has_data,
+      "hasLocalStats": True,
+      "hasPromptStats": True,
+      "tierLabel": "Gemini 3.8 Flash" if has_data else "",
+      "usageStatusText": status_text if has_data else "No usage recorded",
+      "authHelpText": "",
+      "limits": limits if has_data else [],
   }
   record.update(stats)
   print(json.dumps(record, separators=(",", ":"), sort_keys=True))

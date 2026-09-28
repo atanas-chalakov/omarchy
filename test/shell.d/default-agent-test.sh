@@ -753,6 +753,21 @@ grep -F "omarchy agent prompt" "$test_tmp/positional-output" >/dev/null ||
 [[ ! -s $launch_log ]] || fail "omarchy agent starts nothing for a positional prompt"
 pass "omarchy agent keeps prompts on the prompt route"
 
+: >"$launch_log"
+OMARCHY_TEST_AGENT_INSTALLED=true omarchy-default-agent agy
+omarchy-agent --continue
+mapfile -d '' -t launch_args <"$launch_log"
+[[ ${launch_args[*]} == "--app-id=org.omarchy.agent agy --dangerously-skip-permissions --continue" ]] ||
+  fail "agent launcher passes --continue"
+pass "agent launcher passes --continue"
+
+: >"$launch_log"
+omarchy-agent --plan
+mapfile -d '' -t launch_args <"$launch_log"
+[[ ${launch_args[*]} == "--app-id=org.omarchy.agent agy --dangerously-skip-permissions --mode plan" ]] ||
+  fail "agent launcher passes --plan"
+pass "agent launcher passes --plan"
+
 printf '%s\n' "missing" >"$agent_file"
 if OMARCHY_TEST_MISSING_COMMAND=missing omarchy-agent >"$test_tmp/missing-output" 2>&1; then
   fail "agent launcher rejects a missing default command"
