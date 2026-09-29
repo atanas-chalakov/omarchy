@@ -1,13 +1,46 @@
 #!/bin/bash
 
 # omarchy:summary=Launch a TUI command in the default terminal with Omarchy styling
-# omarchy:args=[--app-id=<app-id>] <command> [args...]
+# omarchy:args=[--app-id=<app-id>] [--title=<title>] <command> [args...]
 
-if [[ ${1:-} == --app-id=* ]]; then
-  APP_ID="${1#--app-id=}"
-  shift
-else
-  APP_ID="org.omarchy.$(basename $1)"
+app_id=""
+title=""
+
+while [[ ${1:-} == --* ]]; do
+  case "$1" in
+    --app-id=*)
+      app_id="${1#--app-id=}"
+      shift
+      ;;
+    --title=*)
+      title="${1#--title=}"
+      shift
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+if [[ -z $app_id ]]; then
+  app_id="org.omarchy.$(basename "$1")"
 fi
 
-exec setsid uwsm-app -- xdg-terminal-exec --app-id=$APP_ID -e "$1" "${@:2}"
+if [[ -z $title ]]; then
+  cmd_base="$(basename "$1")"
+  case "$cmd_base" in
+    agy) title="Antigravity" ;;
+    claude) title="Claude Code" ;;
+    copilot) title="GitHub Copilot" ;;
+    codex) title="Codex" ;;
+    *) title="${cmd_base^}" ;;
+  esac
+
+  branch="$(git branch --show-current 2>/dev/null)"
+  if [[ -n $branch ]]; then
+    repo="$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")"
+    title="$title · $repo ($branch)"
+  fi
+fi
+
+exec setsid uwsm-app -- xdg-terminal-exec --app-id="$app_id" --title="$title" -e "$1" "${@:2}"
