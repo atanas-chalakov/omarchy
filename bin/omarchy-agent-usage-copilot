@@ -83,7 +83,7 @@ def scan_copilot_history(base_dir: Path) -> dict[str, Any]:
         c.execute("SELECT count(*) FROM sessions")
         total_sessions = int(c.fetchone()[0] or 0)
         c.execute(
-            "SELECT count(*) FROM sessions WHERE substr(updated_at, 1, 10) = ?",
+            "SELECT count(*) FROM sessions WHERE date(updated_at, 'localtime') = ?",
             (today_str,),
         )
         today_sessions = int(c.fetchone()[0] or 0)
@@ -95,7 +95,7 @@ def scan_copilot_history(base_dir: Path) -> dict[str, Any]:
         c.execute("SELECT count(*) FROM turns")
         total_prompts = int(c.fetchone()[0] or 0)
         c.execute(
-            "SELECT count(*) FROM turns WHERE substr(timestamp, 1, 10) = ?",
+            "SELECT count(*) FROM turns WHERE date(timestamp, 'localtime') = ?",
             (today_str,),
         )
         today_prompts = int(c.fetchone()[0] or 0)
@@ -124,11 +124,15 @@ def scan_copilot_history(base_dir: Path) -> dict[str, Any]:
         )
         for m, inp, out, cr, cw in c.fetchall():
           if m:
+            input_val = int(inp or 0)
+            cache_read = int(cr or 0)
+            cache_write = int(cw or 0)
+            uncached_input = max(0, input_val - cache_read - cache_write)
             model_usage[str(m)] = {
-                "inputTokens": int(inp or 0),
+                "inputTokens": uncached_input,
                 "outputTokens": int(out or 0),
-                "cacheReadInputTokens": int(cr or 0),
-                "cacheCreationInputTokens": int(cw or 0),
+                "cacheReadInputTokens": cache_read,
+                "cacheCreationInputTokens": cache_write,
             }
       except Exception:
         pass
@@ -137,7 +141,7 @@ def scan_copilot_history(base_dir: Path) -> dict[str, Any]:
       try:
         c.execute(
             "SELECT model, sum(input_tokens + output_tokens) "
-            "FROM assistant_usage_events WHERE substr(created_at, 1, 10) = ? "
+            "FROM assistant_usage_events WHERE date(created_at, 'localtime') = ? "
             "GROUP BY model",
             (today_str,),
         )
@@ -152,8 +156,8 @@ def scan_copilot_history(base_dir: Path) -> dict[str, Any]:
       # Daily tokens across recent days
       try:
         c.execute(
-            "SELECT substr(created_at, 1, 10), sum(input_tokens + output_tokens) "
-            "FROM assistant_usage_events GROUP BY substr(created_at, 1, 10)"
+            "SELECT date(created_at, 'localtime'), sum(input_tokens + output_tokens) "
+            "FROM assistant_usage_events GROUP BY date(created_at, 'localtime')"
         )
         by_day = {str(k): int(v or 0) for k, v in c.fetchall() if k}
       except Exception:
@@ -162,8 +166,8 @@ def scan_copilot_history(base_dir: Path) -> dict[str, Any]:
       # Active dates
       try:
         c.execute(
-            "SELECT DISTINCT substr(created_at, 1, 10) FROM assistant_usage_events "
-            "UNION SELECT DISTINCT substr(timestamp, 1, 10) FROM turns"
+            "SELECT DISTINCT date(created_at, 'localtime') FROM assistant_usage_events "
+            "UNION SELECT DISTINCT date(timestamp, 'localtime') FROM turns"
         )
         active_dates = sorted([str(r[0]) for r in c.fetchall() if r[0]])
       except Exception:
@@ -175,24 +179,7 @@ def scan_copilot_history(base_dir: Path) -> dict[str, Any]:
 
   recent_days = [{"date": d, "messageCount": by_day.get(d, 0)} for d in recent_dates]
 
-  limits = []
-  if total_prompts > 0 or total_sessions > 0:
-    session_percent = min(1.0, max(0.02, active_turns / 50.0))
-    limits.append({
-        "label": "Session",
-        "title": "Session Turns",
-        "percent": round(session_percent, 2),
-        "resetsAt": "",
-    })
-
-    next_midnight = (today + dt.timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z")
-    daily_percent = min(1.0, max(0.02, today_prompts / 50.0))
-    limits.append({
-        "label": "Weekly (7-day)",
-        "title": "Daily Quota",
-        "percent": round(daily_percent, 2),
-        "resetsAt": next_midnight,
-    })
+  limits: list[dict[str, Any]] = []
 
   status_text = ""
   if active_session_id:

@@ -169,37 +169,12 @@ def scan_antigravity_history(base_dir: Path) -> dict[str, Any]:
     }
     today_tokens_by_model[model_id] = total_tokens
 
-  recent_days = []
-  for d in recent_date_strings():
-    count = day_counts.get(d, 0)
-    if d == today_str and total_tokens > 0:
-      count = total_tokens
-    recent_days.append({"date": d, "messageCount": count})
+  recent_days = [{"date": d, "messageCount": day_counts.get(d, 0)} for d in recent_date_strings()]
 
   total_sessions = len(conversation_ids) if conversation_ids else (1 if total_prompts > 0 else 0)
   today_sessions = len(today_conversations) if today_conversations else (1 if today_prompts > 0 else 0)
 
-  limits = []
-  if total_prompts > 0 or total_sessions > 0:
-    session_turns = prompts_by_conv.get(active_id, 1) if active_id else 1
-    session_percent = min(1.0, max(0.02, session_turns / 50.0))
-    limits.append({
-        "label": "Session",
-        "title": "Session Turns",
-        "percent": round(session_percent, 2),
-        "resetsAt": "",
-    })
-
-    local_now = dt.datetime.now().astimezone()
-    next_local_midnight = (local_now + dt.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    next_midnight = next_local_midnight.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    daily_percent = min(1.0, max(0.02, today_prompts / 50.0))
-    limits.append({
-        "label": "Weekly (7-day)",
-        "title": "Daily Quota",
-        "percent": round(daily_percent, 2),
-        "resetsAt": next_midnight,
-    })
+  limits: list[dict[str, Any]] = []
 
   status_text = ""
   if active_conv and active_conv.get("title"):

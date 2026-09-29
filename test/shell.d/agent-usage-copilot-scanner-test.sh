@@ -62,9 +62,9 @@ pass "Copilot collector counts total sessions"
   fail "Copilot collector populates recentDays with token count" "$result"
 pass "Copilot collector populates recentDays with token count"
 
-[[ $(jq -r '.limits | length' <<<"$result") -ge 1 ]] ||
-  fail "Copilot collector populates limits" "$result"
-pass "Copilot collector populates limits"
+[[ $(jq -r '.limits | length' <<<"$result") -eq 0 ]] ||
+  fail "Copilot collector reports empty limits without quota data" "$result"
+pass "Copilot collector reports empty limits without quota data"
 
 [[ $(jq -r '.tierLabel' <<<"$result") == "GitHub Copilot" ]] ||
   fail "Copilot collector reports tierLabel" "$result"
@@ -73,3 +73,24 @@ pass "Copilot collector reports tierLabel"
 [[ $(jq -r '.modelUsage["gpt-5-mini"].inputTokens' <<<"$result") == "100" ]] ||
   fail "Copilot collector reports model input tokens" "$result"
 pass "Copilot collector reports model input tokens"
+
+# Test 3: Prompt caching subtracts from inputTokens to avoid double-counting
+sqlite3 "$data_dir/session-store.db" <<EOF
+INSERT INTO assistant_usage_events (session_id, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, created_at)
+  VALUES ('s1', 'claude-sonnet-4.6', 10000, 500, 9000, 0, datetime('now'));
+EOF
+
+result=$(HOME="$TEST_HOME" COPILOT_HOME="$data_dir" "$ROOT/bin/omarchy-agent-usage-copilot")
+model_total=$(jq -r '.modelUsage["claude-sonnet-4.6"] | .inputTokens + .outputTokens + .cacheReadInputTokens + .cacheCreationInputTokens' <<<"$result")
+[[ $(jq -r '.modelUsage["claude-sonnet-4.6"].inputTokens' <<<"$result") == "1000" ]] ||
+  fail "Copilot collector subtracts cache read tokens from input tokens" "$result"
+[[ $model_total == "10500" ]] ||
+  fail "Copilot collector model row total matches input plus output tokens" "$model_total"
+pass "Copilot collector accounts for cache tokens without double counting"
+
+# Test 4: Timezone conversion matches local date across different UTC offsets
+if (( 10#$(date -u +%H) >= 10 )); then zone=Etc/GMT-14; else zone=Etc/GMT+12; fi
+tz_result=$(TZ=$zone HOME="$TEST_HOME" COPILOT_HOME="$data_dir" "$ROOT/bin/omarchy-agent-usage-copilot")
+[[ $(jq -r '.todayPrompts' <<<"$tz_result") == "2" ]] ||
+  fail "Copilot collector uses local date in sqlite date comparisons" "$tz_result"
+pass "Copilot collector handles timezones consistently"

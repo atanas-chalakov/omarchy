@@ -57,9 +57,9 @@ pass "Antigravity collector counts total sessions"
   fail "Antigravity collector populates recentDays" "$result"
 pass "Antigravity collector populates recentDays"
 
-[[ $(jq -r '.limits | length' <<<"$result") -ge 1 ]] ||
-  fail "Antigravity collector populates limits" "$result"
-pass "Antigravity collector populates limits"
+[[ $(jq -r '.limits | length' <<<"$result") -eq 0 ]] ||
+  fail "Antigravity collector reports empty limits without quota data" "$result"
+pass "Antigravity collector reports empty limits without quota data"
 
 [[ $(jq -r '.tierLabel' <<<"$result") == "Gemini 3.8 Flash" ]] ||
   fail "Antigravity collector reports tierLabel" "$result"
