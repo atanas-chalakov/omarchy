@@ -1,0 +1,196 @@
+#!/bin/bash
+
+# omarchy:summary=Browse and resume past AI agent sessions interactively
+# omarchy:args=[--inline] [--agent=<name>]
+# omarchy:examples=omarchy agent sessions | omarchy agent sessions --inline
+
+set -euo pipefail
+
+inline=false
+agent_override=""
+
+while (($#)); do
+  case "$1" in
+    --inline)
+      inline=true
+      shift
+      ;;
+    --agent=*)
+      agent_override="${1#--agent=}"
+      shift
+      ;;
+    -h | --help)
+      exec omarchy agent sessions --help
+      ;;
+    *)
+      echo "Unexpected argument: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+agent="${agent_override:-$(omarchy-default-agent)}"
+if [[ -z $agent ]]; then
+  agent="agy"
+fi
+
+if omarchy-cmd-missing fzf; then
+  echo "fzf is required for interactive session browsing. Install with: pacman -S fzf" >&2
+  exit 1
+fi
+
+case "$agent" in
+  agy | antigravity)
+    data_dir="${ANTIGRAVITY_DATA_DIR:-$HOME/.gemini/antigravity-cli}"
+    db_path="$data_dir/conversation_summaries.db"
+    if [[ ! -f $db_path ]]; then
+      echo "No Antigravity session history found in $data_dir." >&2
+      exit 0
+    fi
+
+    # Read sessions: id \t date \t step_count \t title
+    sessions=$(python3 - <<EOF
+import sqlite3, os, sys
+from pathlib import Path
+
+db = Path("$db_path")
+if not db.is_file():
+  sys.exit(0)
+
+try:
+  conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+  c = conn.cursor()
+  c.execute("SELECT conversation_id, title, last_modified_time, step_count FROM conversation_summaries ORDER BY last_modified_time DESC")
+  for cid, title, mtime, steps in c.fetchall():
+    d = (mtime or "")[:16].replace("T", " ")
+    st = f"{steps or 0} steps"
+    t = (title or "Untitled Session").strip()
+    print(f"{cid}\t{d}\t{st}\t{t}")
+  conn.close()
+except Exception:
+  pass
+EOF
+)
+
+    if [[ -z $sessions ]]; then
+      echo "No previous Antigravity sessions found." >&2
+      exit 0
+    fi
+
+    # Interactive picker with live transcript preview
+    preview_cmd='python3 -c "
+import json, sys
+from pathlib import Path
+t = Path(\"'"$data_dir"'\" + \"/brain/\" + \"{1}\" + \"/.system_generated/logs/transcript.jsonl\")
+if t.is_file():
+  try:
+    with open(t, \"r\", encoding=\"utf-8\", errors=\"ignore\") as f:
+      for line in f:
+        if not line.strip(): continue
+        e = json.loads(line)
+        if e.get(\"type\") == \"USER_INPUT\":
+          c = e.get(\"content\", \"\").replace(\"<USER_REQUEST>\", \"\").replace(\"</USER_REQUEST>\", \"\").strip()
+          c = c.split(\"<ADDITIONAL_METADATA>\")[0].strip()
+          if c:
+            print(\"\033[1;34m>\033[0m \" + c[:100])
+  except Exception:
+    pass
+"'
+
+    selected=$(printf '%s\n' "$sessions" | fzf \
+      --delimiter=$'\t' \
+      --with-nth=2,3,4 \
+      --preview="$preview_cmd" \
+      --preview-window='right:55%:wrap' \
+      --prompt="Resume Antigravity Session > " \
+      --header="Select a past session to resume (ESC to cancel)" \
+      --reverse || true)
+
+    if [[ -z $selected ]]; then
+      exit 0
+    fi
+
+    cid=$(awk -F'\t' '{print $1}' <<<"$selected")
+    title=$(awk -F'\t' '{print $4}' <<<"$selected")
+
+    if [[ $inline == "true" ]]; then
+      exec agy --dangerously-skip-permissions --conversation "$cid"
+    else
+      exec omarchy-launch-tui --app-id=org.omarchy.agent --title="Antigravity · $title" agy --dangerously-skip-permissions --conversation "$cid"
+    fi
+    ;;
+
+  copilot)
+    data_dir="${COPILOT_HOME:-$HOME/.copilot}"
+    db_path="$data_dir/session-store.db"
+    if [[ ! -f $db_path ]]; then
+      echo "No Copilot session history found in $data_dir." >&2
+      exit 0
+    fi
+
+    sessions=$(python3 - <<EOF
+import sqlite3, os, sys
+from pathlib import Path
+
+db = Path("$db_path")
+if not db.is_file():
+  sys.exit(0)
+
+try:
+  conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+  c = conn.cursor()
+  c.execute("SELECT id, summary, branch, updated_at FROM sessions ORDER BY updated_at DESC")
+  for sid, summary, branch, updated in c.fetchall():
+    d = (updated or "")[:16].replace("T", " ")
+    b = (branch or "main")
+    s = (summary or b or "Session").strip()
+    print(f"{sid}\t{d}\t{b}\t{s}")
+  conn.close()
+except Exception:
+  pass
+EOF
+)
+
+    if [[ -z $sessions ]]; then
+      echo "No previous Copilot sessions found." >&2
+      exit 0
+    fi
+
+    preview_cmd='sqlite3 "'"$db_path"'" "SELECT user_message FROM turns WHERE session_id = '\''{1}'\'' ORDER BY id ASC LIMIT 10"'
+
+    selected=$(printf '%s\n' "$sessions" | fzf \
+      --delimiter=$'\t' \
+      --with-nth=2,3,4 \
+      --preview="$preview_cmd" \
+      --preview-window='right:55%:wrap' \
+      --prompt="Resume Copilot Session > " \
+      --header="Select a past session to resume (ESC to cancel)" \
+      --reverse || true)
+
+    if [[ -z $selected ]]; then
+      exit 0
+    fi
+
+    cid=$(awk -F'\t' '{print $1}' <<<"$selected")
+    title=$(awk -F'\t' '{print $4}' <<<"$selected")
+
+    if [[ $inline == "true" ]]; then
+      exec copilot --allow-all --resume "$cid"
+    else
+      exec omarchy-launch-tui --app-id=org.omarchy.agent --title="GitHub Copilot · $title" copilot --allow-all --resume "$cid"
+    fi
+    ;;
+
+  claude)
+    if [[ $inline == "true" ]]; then
+      exec claude --resume
+    else
+      exec omarchy-launch-tui --app-id=org.omarchy.agent claude --resume
+    fi
+    ;;
+
+  *)
+    echo "Sessions browsing not supported for agent: $agent" >&2
+    exit 1
+    ;;
+esac

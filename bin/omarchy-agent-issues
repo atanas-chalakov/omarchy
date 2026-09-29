@@ -1,0 +1,93 @@
+#!/bin/bash
+
+# omarchy:summary=Browse GitHub issues interactively and solve them with the agent
+# omarchy:args=[--inline] [--repo=<owner/repo>] [--limit=<n>]
+# omarchy:examples=omarchy agent issues | omarchy agent issues --repo omacom/omarchy
+
+set -euo pipefail
+
+inline=false
+repo=""
+limit=50
+
+while (($#)); do
+  case "$1" in
+    --inline)
+      inline=true
+      shift
+      ;;
+    --repo=*)
+      repo="${1#--repo=}"
+      shift
+      ;;
+    --limit=*)
+      limit="${1#--limit=}"
+      shift
+      ;;
+    -h | --help)
+      exec omarchy agent issues --help
+      ;;
+    *)
+      echo "Unexpected argument: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+if omarchy-cmd-missing gh; then
+  echo "GitHub CLI (gh) is required. Install with: pacman -S github-cli" >&2
+  exit 1
+fi
+
+if omarchy-cmd-missing fzf; then
+  echo "fzf is required for interactive browsing. Install with: pacman -S fzf" >&2
+  exit 1
+fi
+
+gh_args=()
+if [[ -n $repo ]]; then
+  gh_args+=(--repo "$repo")
+fi
+
+# Fetch issue list
+issues=$(gh issue list "${gh_args[@]}" --limit "$limit" 2>&1 || true)
+if [[ $issues == *"No default remote"* || $issues == *"not logged into"* ]]; then
+  echo "$issues" >&2
+  echo "Hint: run 'gh repo set-default' or pass '--repo=owner/repo'." >&2
+  exit 1
+fi
+
+if [[ -z $issues || $issues == *"no open issues"* ]]; then
+  echo "No open issues found." >&2
+  exit 0
+fi
+
+# Format with fzf
+preview_cmd='gh issue view {1} '"${repo:+--repo \"$repo\"}"
+selected=$(printf '%s\n' "$issues" | fzf \
+  --preview="$preview_cmd" \
+  --preview-window='right:60%:wrap' \
+  --prompt="GitHub Issues > " \
+  --header="Enter: Ask Agent to solve | Ctrl-O: Open in Browser | ESC: Cancel" \
+  --bind="ctrl-o:execute-silent(gh issue view --web {1} ${repo:+--repo \"$repo\"})" \
+  --reverse || true)
+
+if [[ -z $selected ]]; then
+  exit 0
+fi
+
+issue_num=$(awk '{print $1}' <<<"$selected" | tr -d '#')
+issue_title=$(awk '{$1=""; print $0}' <<<"$selected" | sed 's/^[ \t]*//')
+
+echo "Selected Issue #$issue_num: $issue_title"
+confirm=""
+if [[ -t 0 ]]; then
+  read -r -p "Launch default agent to work on this issue? [Y/n] " confirm || confirm="y"
+else
+  read -r confirm || confirm="y"
+fi
+if [[ -z $confirm || $confirm =~ ^[Yy]$ ]]; then
+  prompt_args=()
+  [[ $inline == "true" ]] && prompt_args+=(--inline)
+  exec omarchy-agent-prompt "${prompt_args[@]}" "Work on GitHub Issue #$issue_num: $issue_title. First inspect the issue details using 'gh issue view $issue_num ${repo:+--repo $repo}', plan the fix, and implement the necessary changes."
+fi

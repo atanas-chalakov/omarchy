@@ -1,0 +1,93 @@
+#!/bin/bash
+
+# omarchy:summary=Browse GitHub pull requests interactively and review them with the agent
+# omarchy:args=[--inline] [--repo=<owner/repo>] [--limit=<n>]
+# omarchy:examples=omarchy agent prs | omarchy agent prs --repo omacom/omarchy
+
+set -euo pipefail
+
+inline=false
+repo=""
+limit=50
+
+while (($#)); do
+  case "$1" in
+    --inline)
+      inline=true
+      shift
+      ;;
+    --repo=*)
+      repo="${1#--repo=}"
+      shift
+      ;;
+    --limit=*)
+      limit="${1#--limit=}"
+      shift
+      ;;
+    -h | --help)
+      exec omarchy agent prs --help
+      ;;
+    *)
+      echo "Unexpected argument: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+if omarchy-cmd-missing gh; then
+  echo "GitHub CLI (gh) is required. Install with: pacman -S github-cli" >&2
+  exit 1
+fi
+
+if omarchy-cmd-missing fzf; then
+  echo "fzf is required for interactive browsing. Install with: pacman -S fzf" >&2
+  exit 1
+fi
+
+gh_args=()
+if [[ -n $repo ]]; then
+  gh_args+=(--repo "$repo")
+fi
+
+# Fetch PR list
+prs=$(gh pr list "${gh_args[@]}" --limit "$limit" 2>&1 || true)
+if [[ $prs == *"No default remote"* || $prs == *"not logged into"* ]]; then
+  echo "$prs" >&2
+  echo "Hint: run 'gh repo set-default' or pass '--repo=owner/repo'." >&2
+  exit 1
+fi
+
+if [[ -z $prs || $prs == *"no open pull requests"* ]]; then
+  echo "No open pull requests found." >&2
+  exit 0
+fi
+
+# Format with fzf
+preview_cmd='gh pr view {1} '"${repo:+--repo \"$repo\"}"
+selected=$(printf '%s\n' "$prs" | fzf \
+  --preview="$preview_cmd" \
+  --preview-window='right:60%:wrap' \
+  --prompt="GitHub Pull Requests > " \
+  --header="Enter: Ask Agent to review | Ctrl-O: Open in Browser | ESC: Cancel" \
+  --bind="ctrl-o:execute-silent(gh pr view --web {1} ${repo:+--repo \"$repo\"})" \
+  --reverse || true)
+
+if [[ -z $selected ]]; then
+  exit 0
+fi
+
+pr_num=$(awk '{print $1}' <<<"$selected" | tr -d '#')
+pr_title=$(awk '{$1=""; print $0}' <<<"$selected" | sed 's/^[ \t]*//')
+
+echo "Selected PR #$pr_num: $pr_title"
+confirm=""
+if [[ -t 0 ]]; then
+  read -r -p "Launch default agent to review this pull request? [Y/n] " confirm || confirm="y"
+else
+  read -r confirm || confirm="y"
+fi
+if [[ -z $confirm || $confirm =~ ^[Yy]$ ]]; then
+  prompt_args=()
+  [[ $inline == "true" ]] && prompt_args+=(--inline)
+  exec omarchy-agent-prompt "${prompt_args[@]}" "Review GitHub Pull Request #$pr_num: $pr_title. First inspect the PR diff and details using 'gh pr view $pr_num ${repo:+--repo $repo}' and 'gh pr diff $pr_num ${repo:+--repo $repo}', analyze code changes, check for any bugs, style or design issues, and provide a constructive review."
+fi
