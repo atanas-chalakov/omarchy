@@ -149,7 +149,7 @@ def scan_antigravity_history(base_dir: Path) -> dict[str, Any]:
       pass
 
   active_conv = get_active_conversation(base_dir)
-  active_id = active_conv["id"] if active_conv else (list(conversation_ids)[-1] if conversation_ids else "")
+  active_id = active_conv["id"] if active_conv else (sorted(conversation_ids)[-1] if conversation_ids else "")
 
   in_tokens, out_tokens = 0, 0
   if active_id:
@@ -190,7 +190,9 @@ def scan_antigravity_history(base_dir: Path) -> dict[str, Any]:
         "resetsAt": "",
     })
 
-    next_midnight = (today + dt.timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z")
+    local_now = dt.datetime.now().astimezone()
+    next_local_midnight = (local_now + dt.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    next_midnight = next_local_midnight.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     daily_percent = min(1.0, max(0.02, today_prompts / 50.0))
     limits.append({
         "label": "Weekly (7-day)",
